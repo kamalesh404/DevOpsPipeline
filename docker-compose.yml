@@ -1,0 +1,93 @@
+name: devopspipeline
+
+x-app-base: &app-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: devopspipeline:latest
+  environment: &app-env
+    DEVOPS_REDIS_URL: redis://redis:6379/0
+    DEVOPS_DATABASE_URL: postgresql://devops:devops@postgres:5432/devops
+    DEVOPS_LOG_LEVEL: INFO
+    DEVOPS_WORKSPACE_ROOT: /tmp/devops-workspaces
+  volumes:
+    - workspaces:/tmp/devops-workspaces
+    - /var/run/docker.sock:/var/run/docker.sock
+  restart: unless-stopped
+  networks:
+    - backend
+
+services:
+  api:
+    <<: *app-base
+    command: >
+      python -m uvicorn src.dashboard.app:create_app --factory
+      --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    <<: *app-base
+    command: python -m src.orchestrator.scheduler
+    environment:
+      <<: *app-env
+      DEVOPS_ROLE: worker
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    deploy:
+      replicas: 2
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - backend
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: devops
+      POSTGRES_PASSWORD: devops
+      POSTGRES_DB: devops
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devops -d devops"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+volumes:
+  workspaces:
+  redis-data:
+  pg-data:
+
+networks:
+  backend:
+    driver: bridge
